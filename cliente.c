@@ -143,6 +143,25 @@ int main(int argc, char *argv[]) {
     strcpy(login.mensagem, "Entrei"); 
     write(fd_controlador, &login, sizeof(Mensagem));
 
+    int fd_resposta = open(pipe_cliente, O_RDONLY);
+    if (fd_resposta == -1) {
+        perror("[ERRO] Não consegui abrir o meu pipe para resposta");
+        return 1;
+    }
+
+    Mensagem resposta;
+    read(fd_resposta, &resposta, sizeof(Mensagem)); // <--- FICA AQUI PARADO À ESPERA
+    close(fd_resposta);
+
+    // 3. VERIFICAR SE POSSO ENTRAR
+    if (strcmp(resposta.comando, "erro") == 0) {
+        printf("[ERRO FATAL] %s\n", resposta.mensagem);
+        unlink(pipe_cliente); // Limpa o pipe antes de morrer
+        return 1; // TERMINA O PROGRAMA AQUI! O menu nunca aparece.
+    }
+
+    printf("[SUCESSO] %s\n", resposta.mensagem);
+
     if (fork() == 0) {
         receberMensagens();
         exit(0);

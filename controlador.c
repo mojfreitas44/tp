@@ -280,9 +280,48 @@ void processar_comando_cliente(Mensagem *m) {
     char loc[100];
 
     if (strcmp(m->comando, "login") == 0) {
-        registar_cliente(m->pid, m->username); 
-        sprintf(msg_buf, "Cliente %s (PID %d) entrou.", m->username, m->pid);
-        log_msg("[LOGIN]", msg_buf);
+        // --- VERIFICAÇÃO DE DUPLICADOS ---
+        int existe = 0;
+        for (int i = 0; i < NUTILIZADORES; i++) {
+            if (ctrl.clientes[i].pid > 0 && strcmp(ctrl.clientes[i].username, m->username) == 0) {
+                existe = 1;
+                break;
+            }
+        }
+
+        // Preparar comunicação com o cliente
+        char pipe_cli[100];
+        sprintf(pipe_cli, PIPE_CLIENTE, m->pid);
+        int fd = open(pipe_cli, O_WRONLY | O_NONBLOCK);
+
+        if (existe) {
+            // CASO DE ERRO: Avisar e não registar
+            if (fd != -1) {
+                Mensagem erro;
+                erro.pid = getpid();
+                strcpy(erro.comando, "erro");
+                sprintf(erro.mensagem, "Utilizador '%s' ja existe.", m->username);
+                write(fd, &erro, sizeof(Mensagem));
+                close(fd);
+            }
+            log_msg("[LOGIN]", "Rejeitado: nome duplicado.");
+        } 
+        else {
+            // CASO DE SUCESSO: Registar e AVISAR O CLIENTE (Isto faltava!)
+            registar_cliente(m->pid, m->username); 
+            
+            if (fd != -1) {
+                Mensagem ok;
+                ok.pid = getpid();
+                strcpy(ok.comando, "login_ok"); // Código de sucesso
+                strcpy(ok.mensagem, "Login aceite.");
+                write(fd, &ok, sizeof(Mensagem));
+                close(fd);
+            }
+            
+            sprintf(msg_buf, "Cliente %s (PID %d) entrou.", m->username, m->pid);
+            log_msg("[LOGIN]", msg_buf);
+        }
     }
     else if (strcmp(m->comando, "agendar") == 0) {
         if (sscanf(m->mensagem, "%d %99s %d", &h, loc, &d) == 3) {
