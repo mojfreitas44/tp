@@ -74,6 +74,7 @@ void enviarComandos(const char *username) {
     // MENU SIMPLIFICADO (Sem entrar/sair)
     printf("\n--- Comandos Disponíveis ---\n");
     printf(" agendar <hora> <local> <km>\n");
+    printf(" consultar\n");
     printf(" terminar\n");
     printf("----------------------------\n");
 
@@ -99,7 +100,7 @@ void enviarComandos(const char *username) {
         else msg.mensagem[0] = '\0';
 
         // Apenas aceita os comandos de gestão, já não aceita entrar/sair
-        if(strcmp(cmd, "agendar") == 0 || strcmp(cmd, "cancelar") == 0 || strcmp(cmd, "terminar") == 0) {
+        if(strcmp(cmd, "agendar") == 0 || strcmp(cmd, "consultar") == 0 || strcmp(cmd, "cancelar") == 0 || strcmp(cmd, "terminar") == 0) {
             write(fd_controlador, &msg, sizeof(Mensagem));
             
             //if(strcmp(cmd, "terminar") == 0) break;

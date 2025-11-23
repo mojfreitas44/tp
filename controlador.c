@@ -349,6 +349,43 @@ void processar_comando_cliente(Mensagem *m) {
             log_msg("[ERRO]", "Formato incorreto.");
         }
     } 
+    else if (strcmp(m->comando, "consultar") == 0) {
+        log_msg("[PEDIDO]", "Cliente pediu consulta de agenda.");
+        
+        int encontrou = 0;
+        char resposta[256];
+        
+        // Preparar o pipe para responder ao cliente
+        char pipe_cli[100];
+        sprintf(pipe_cli, PIPE_CLIENTE, m->pid);
+        int fd_resp = open(pipe_cli, O_WRONLY | O_NONBLOCK);
+        
+        if (fd_resp != -1) {
+            Mensagem resp;
+            resp.pid = getpid();
+            strcpy(resp.comando, "resposta");
+
+            // Varrer a agenda à procura de viagens deste cliente
+            for (int i = 0; i < MAX_AGENDAMENTOS; i++) {
+                if (ctrl.agenda[i].ativo && ctrl.agenda[i].pid_cliente == m->pid) {
+                    
+                    sprintf(resposta, "Agendamento ID %d: %dh -> %s (%dkm)", 
+                            i, ctrl.agenda[i].hora, ctrl.agenda[i].local, ctrl.agenda[i].distancia);
+                    
+                    strcpy(resp.mensagem, resposta);
+                    write(fd_resp, &resp, sizeof(Mensagem));
+                    encontrou = 1;
+                }
+            }
+
+            if (!encontrou) {
+                strcpy(resp.mensagem, "Não tens agendamentos pendentes.");
+                write(fd_resp, &resp, sizeof(Mensagem));
+            }
+            
+            close(fd_resp);
+        }
+    }
     else if (strcmp(m->comando, "cancelar") == 0) {
         sprintf(msg_buf, "Cliente %s pediu cancelamento (WIP).", m->username);
         log_msg("[CANCELAR]", msg_buf);
