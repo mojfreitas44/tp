@@ -178,6 +178,61 @@ void registar_agendamento(char* user, pid_t pid, int h, int d, char* loc) {
     }
     log_msg("[ERRO]", "Lista de agendamentos cheia!");
 }
+int cancelar_servico(pid_t pid_solicitante, int id_cancelar) {
+    int cancelados = 0;
+
+    // 1. Cancelar Veículos Ativos (Viagens em curso)
+    for (int i = 0; i < ctrl.num_veiculos; i++) {
+        if (ctrl.frota[i].pid > 0) {
+            // Lógica de permissão para matar o veículo:
+            int alvo_correto = 0;
+
+            if (pid_solicitante == -1) {
+                // ADMIN: Cancela se id for 0 (tudo) OU se coincidir com o PID do cliente dono do carro
+                if (id_cancelar == 0 || ctrl.frota[i].pid_cliente == id_cancelar) alvo_correto = 1;
+            } else {
+                // CLIENTE: Só cancela se o carro for dele
+                if (ctrl.frota[i].pid_cliente == pid_solicitante) alvo_correto = 1;
+            }
+
+            if (alvo_correto) {
+                kill(ctrl.frota[i].pid, SIGUSR1); // Mata o veículo
+                close(ctrl.frota[i].fd_leitura);
+                
+                ctrl.frota[i].pid = -1; 
+                ctrl.frota[i].pid_cliente = -1;
+                strcpy(ctrl.frota[i].ultimo_status, "Cancelado pelo Admin/User");
+                
+                cancelados++;
+                printf("[SISTEMA] Veículo interrompido à força.\n");
+            }
+        }
+    }
+
+    // 2. Cancelar Agendamentos Pendentes
+    for (int i = 0; i < MAX_AGENDAMENTOS; i++) {
+        if (ctrl.agenda[i].ativo) {
+            int alvo_correto = 0;
+
+            if (pid_solicitante == -1) {
+                // ADMIN: Cancela se 0 (tudo) ou se o PID do cliente bater certo
+                if (id_cancelar == 0 || ctrl.agenda[i].pid_cliente == id_cancelar) alvo_correto = 1;
+            } else {
+                // CLIENTE: Só cancela se for dele E (for 0 ou for o ID da agenda específico)
+                if (ctrl.agenda[i].pid_cliente == pid_solicitante) {
+                    if (id_cancelar == 0 || i == id_cancelar) alvo_correto = 1;
+                }
+            }
+
+            if (alvo_correto) {
+                ctrl.agenda[i].ativo = 0; 
+                cancelados++;
+                printf("[SISTEMA] Agendamento %d removido.\n", i);
+            }
+        }
+    }
+    return cancelados;
+}
 
 // ============================================================================
 // GESTÃO DE VEÍCULOS
@@ -448,7 +503,7 @@ void verificar_clientes() {
 // ============================================================================
 
 void verificar_admin() {
-    char cmd[100];
+    char cmd[100], arg[50];
     int n = read(STDIN_FILENO, cmd, sizeof(cmd)-1);
     if (n > 0) {
         cmd[n] = '\0';
@@ -497,6 +552,21 @@ void verificar_admin() {
             }
             if(vazia) printf("(Nenhum veículo na frota)\n");
             printf("-----------------------\n");
+            fflush(stdout);
+        }
+        else if (strcmp(token, "cancelar") == 0) {
+            // Se não escreveu ID, avisa
+            if (strlen(arg) == 0) {
+                printf("[ERRO] Uso: cancelar <PID_CLIENTE> (ou 0 para tudo)\n");
+            } else {
+                int id_alvo = atoi(arg);
+                printf("[ADMIN] A cancelar serviços do cliente %d (ou todos se 0)...\n", id_alvo);
+                
+                // Chama a função com -1 (Sou Admin) e o PID alvo
+                int n = cancelar_servico(-1, id_alvo);
+                
+                printf("[ADMIN] Resultado: %d serviços cancelados.\n", n);
+            }
             fflush(stdout);
         }
         else if (strcmp(token, "km") == 0) {
