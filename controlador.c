@@ -156,6 +156,21 @@ void setup_inicial() {
     log_msg("[SISTEMA]", "Controlador iniciado.");
 }
 
+// Função auxiliar para enviar mensagens de texto para o pipe privado do cliente
+void enviar_resposta(pid_t pid_cli, char *texto) {
+    char p_name[100];
+    sprintf(p_name, PIPE_CLIENTE, pid_cli);
+    
+    int fd = open(p_name, O_WRONLY | O_NONBLOCK);
+    if (fd != -1) {
+        Mensagem m;
+        m.pid = getpid();
+        strcpy(m.comando, "resposta");
+        strncpy(m.mensagem, texto, 255);
+        write(fd, &m, sizeof(Mensagem));
+        close(fd);
+    }
+}
 // ============================================================================
 // GESTÃO DE AGENDAMENTOS
 // ============================================================================
@@ -181,77 +196,55 @@ void registar_agendamento(char* user, pid_t pid, int h, int d, char* loc) {
 int cancelar_servico(pid_t pid_solicitante, int id_cancelar) {
     int cancelados = 0;
 
-    // 1. Cancelar Veículos Ativos (Viagens em curso)
+    // A. Cancelar Veículos Ativos
     for (int i = 0; i < ctrl.num_veiculos; i++) {
         if (ctrl.frota[i].pid > 0) {
-            // Lógica de permissão para matar o veículo:
-            int alvo_correto = 0;
-
-            if (pid_solicitante == -1) {
-                // ADMIN: Cancela se id for 0 (tudo) OU se coincidir com o PID do cliente dono do carro
-                if (id_cancelar == 0 || ctrl.frota[i].pid_cliente == id_cancelar) alvo_correto = 1;
-            } else {
-                // CLIENTE: Só cancela se o carro for dele
-                if (ctrl.frota[i].pid_cliente == pid_solicitante) alvo_correto = 1;
+            int alvo = 0;
+            if (pid_solicitante == -1) { // Admin
+                if (id_cancelar == 0 || ctrl.frota[i].pid_cliente == id_cancelar) alvo = 1;
+            } else { // Cliente
+                if (ctrl.frota[i].pid_cliente == pid_solicitante) alvo = 1;
             }
 
-            if (alvo_correto) {
-                kill(ctrl.frota[i].pid, SIGUSR1); // Mata o veículo
+            if (alvo) {
+                kill(ctrl.frota[i].pid, SIGUSR1); 
                 close(ctrl.frota[i].fd_leitura);
-                
                 ctrl.frota[i].pid = -1; 
                 ctrl.frota[i].pid_cliente = -1;
-                strcpy(ctrl.frota[i].ultimo_status, "Cancelado pelo Admin/User");
-                
+                strcpy(ctrl.frota[i].ultimo_status, "Cancelado");
                 cancelados++;
-                printf("[SISTEMA] Veículo interrompido à força.\n");
             }
         }
     }
 
-    // 2. Cancelar Agendamentos Pendentes
+    // B. Cancelar Agendamentos Pendentes
     for (int i = 0; i < MAX_AGENDAMENTOS; i++) {
         if (ctrl.agenda[i].ativo) {
-            int alvo_correto = 0;
-
+            int alvo = 0;
             if (pid_solicitante == -1) {
-                // ADMIN: Cancela se 0 (tudo) ou se o PID do cliente bater certo
-                if (id_cancelar == 0 || ctrl.agenda[i].pid_cliente == id_cancelar) alvo_correto = 1;
+                if (id_cancelar == 0 || ctrl.agenda[i].pid_cliente == id_cancelar) alvo = 1;
             } else {
-                // CLIENTE: Só cancela se for dele E (for 0 ou for o ID da agenda específico)
                 if (ctrl.agenda[i].pid_cliente == pid_solicitante) {
-                    if (id_cancelar == 0 || i == id_cancelar) alvo_correto = 1;
+                    if (id_cancelar == 0 || i == id_cancelar) alvo = 1;
                 }
             }
 
-            if (alvo_correto) {
+            if (alvo) {
                 pid_t pid_vitima = ctrl.agenda[i].pid_cliente;
-                ctrl.agenda[i].ativo = 0;
+                ctrl.agenda[i].ativo = 0; 
                 cancelados++;
-                // Notificar o cliente
-                char p_name[100];
-                sprintf(p_name, PIPE_CLIENTE, pid_vitima);
-
-                int fd = open(p_name, O_WRONLY | O_NONBLOCK);
-                if (fd != -1) {
-                    Mensagem m;
-                    m.pid = getpid();
-                    strcpy(m.comando, "resposta");
-                    // 3. Preparar mensagem
-                    char aviso[100];
-                    sprintf(aviso, "O teu agendamento (ID %d) foi cancelado.", i);
-                    strncpy(m.mensagem, aviso, 255);
-                    
-                    // 4. Enviar e fechar
-                    write(fd, &m, sizeof(Mensagem));
-                    close(fd);
-                }
-                printf("[SISTEMA] Agendamento %d removido e cliente notificado.\n", i);            }
+                
+                // Notificação limpa usando a função auxiliar
+                char aviso[100];
+                sprintf(aviso, "O teu agendamento (ID %d) foi cancelado.", i);
+                enviar_resposta(pid_vitima, aviso);
+                
+                printf("[SISTEMA] Agendamento %d removido.\n", i);
+            }
         }
     }
     return cancelados;
 }
-
 // ============================================================================
 // GESTÃO DE VEÍCULOS
 // ============================================================================
@@ -460,8 +453,29 @@ void processar_comando_cliente(Mensagem *m) {
         }
     }
     else if (strcmp(m->comando, "cancelar") == 0) {
-        sprintf(msg_buf, "Cliente %s pediu cancelamento (WIP).", m->username);
-        log_msg("[CANCELAR]", msg_buf);
+        // 1. Ler o ID que o cliente enviou (vem na mensagem)
+        // Se o cliente escreveu só "cancelar", o atoi dá 0 e cancela tudo dele
+        int id_alvo = atoi(m->mensagem);
+        
+        sprintf(msg_buf, "Cliente %s pediu cancelamento (ID=%d).", m->username, id_alvo);
+        log_msg("[PEDIDO]", msg_buf);
+        
+        // 2. Executar o cancelamento usando a função auxiliar que já tens
+        // IMPORTANTE: Passamos m->pid como primeiro argumento para garantir
+        // que o cliente só consegue cancelar as SUAS PRÓPRIAS viagens.
+        int n = cancelar_servico(m->pid, id_alvo);
+        
+        // 3. Responder ao Cliente
+        char resp[100];
+        if (n > 0) {
+            sprintf(resp, "Sucesso: %d serviços cancelados.", n);
+        } else {
+            if (id_alvo == 0) strcpy(resp, "Não tens serviços ativos para cancelar.");
+            else strcpy(resp, "Erro: Serviço não encontrado ou não te pertence.");
+        }
+        
+        // Enviar a resposta para o pipe do cliente
+        enviar_resposta(m->pid, resp);
     }
     else if (strcmp(m->comando, "terminar") == 0) {
         // 1. Verificar se o cliente tem algum veículo ativo
