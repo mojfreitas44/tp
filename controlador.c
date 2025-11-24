@@ -1,5 +1,6 @@
 #include "comum.h"
 
+
 typedef struct {
     pid_t pid;
     int fd_leitura;     
