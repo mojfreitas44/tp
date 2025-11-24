@@ -1,38 +1,43 @@
 #include "comum.h"
 
-
+// Estrutura do Veículo (Frota)
 typedef struct {
     pid_t pid;
     int fd_leitura;     
     int ocupado;
-    pid_t pid_cliente;  // Guardar de quem é o veiculo (para o cancelar)
-    char ultimo_status[50]; // Para guardar o progresso
+    pid_t pid_cliente;  
+    char ultimo_status[50]; 
     int distancia_viagem;
+    int id_servico; 
 } Veiculo;
 
+// Estrutura de Agendamento (Lista de Espera)
 typedef struct {
+    int id; 
     char username[50];
     pid_t pid_cliente;
     int hora;
     int distancia;
     char local[100];
-    int ativo; // 1 = Pendente, 0 = Vazio/Executado
+    int ativo; // 1 = Pendente, 0 = Vazio
 } Agendamento;
 
-// Estrutura para guardar info do cliente (PID + Nome)
+// Estrutura de Informação do Cliente
 typedef struct {
     pid_t pid;
     char username[50];
 } ClienteInfo;
 
+// Estrutura Geral do Controlador
 typedef struct {
     Veiculo frota[NVEICULOS];
-    ClienteInfo clientes[NUTILIZADORES]; // Array de structs, não de ints!
+    ClienteInfo clientes[NUTILIZADORES];
     Agendamento agenda[MAX_AGENDAMENTOS];
     int num_veiculos;   
     int fd_clientes;    
     int tempo;          
     int total_km;       
+    int proximo_id; 
 } Controlador;
 
 static Controlador ctrl;
@@ -46,30 +51,31 @@ void log_msg(const char *tag, const char *msg) {
     fflush(stdout);
 }
 
-// CORREÇÃO: Agora recebe também o nome e acede a .pid e .username
-void registar_cliente(pid_t pid, char* nome) {
+// CORREÇÃO: Agora retorna int (1=Sucesso, 0=Cheio)
+int registar_cliente(pid_t pid, char* nome) {
     for (int i = 0; i < NUTILIZADORES; i++) {
-        if (ctrl.clientes[i].pid == 0) { // Verifica o campo .pid
+        if (ctrl.clientes[i].pid == 0) { // Encontrou slot vazio
             ctrl.clientes[i].pid = pid;
             strcpy(ctrl.clientes[i].username, nome);
-            return;
+            return 1; // Sucesso
         }
     }
+    return 0; // Lista cheia
 }
 
-// CORREÇÃO: Acede a .pid
 void remover_cliente(pid_t pid) {
     for (int i = 0; i < NUTILIZADORES; i++) {
         if (ctrl.clientes[i].pid == pid) {
             ctrl.clientes[i].pid = 0;
-            ctrl.clientes[i].username[0] = '\0'; // Limpa o nome
+            ctrl.clientes[i].username[0] = '\0';
             break;
         }
     }
+    // Cancelar agendamentos pendentes deste cliente
     int cancelados = 0;
     for (int i=0; i<MAX_AGENDAMENTOS; i++){
         if(ctrl.agenda[i].ativo == 1 && ctrl.agenda[i].pid_cliente == pid){
-            ctrl.agenda[i].ativo = 0; // Cancela o agendamento
+            ctrl.agenda[i].ativo = 0;
             cancelados++;
         }
     }
@@ -83,15 +89,12 @@ void remover_cliente(pid_t pid) {
 void limpar_recursos() {
     printf("\n[SISTEMA] A encerrar controlador e notificar todos...\n");
     
-    // CORREÇÃO: Acede a .pid
-    // Notificar Clientes
     for (int i = 0; i < NUTILIZADORES; i++) {
         if (ctrl.clientes[i].pid > 0) {
             kill(ctrl.clientes[i].pid, SIGUSR1);
         }
     }
 
-    // Notificar Veículos
     for (int i = 0; i < ctrl.num_veiculos; i++) {
         if (ctrl.frota[i].pid > 0) {
             kill(ctrl.frota[i].pid, SIGKILL); 
@@ -111,8 +114,8 @@ void setup_inicial() {
     setbuf(stdout, NULL); 
     memset(&ctrl, 0, sizeof(Controlador));
     ctrl.fd_clientes = -1;
+    ctrl.proximo_id = 1; 
 
-    // Verificação de instância única
     int fd_check = open(PIPE_CONTROLADOR, O_WRONLY | O_NONBLOCK);
     if (fd_check != -1) {
         printf("[ERRO] Já existe uma instância do programa controlador em execução!\n");
@@ -138,20 +141,19 @@ void setup_inicial() {
     fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
 
     printf("\n=== CONTROLADOR DE TÁXIS ===\n");
-    printf("--- Comandos Disponíveis ---\n");
-    printf(" listar   -> Ver agendamentos\n");
-    printf(" utiliz   -> Ver utilizadores ligados\n");
-    printf(" frota    -> Ver estado dos veículos\n");
-    printf(" km       -> Ver total de KMs\n");
-    printf(" hora     -> Ver tempo simulado\n");
-    printf(" cancelar -> Cancelar serviço (ID/PID)\n");
-    printf(" terminar -> Encerrar sistema\n");
+    printf("--- Comandos Admin ---\n");
+    printf(" listar        -> Ver agendamentos\n");
+    printf(" utiliz        -> Ver utilizadores ligados\n");
+    printf(" frota         -> Ver estado dos veículos\n");
+    printf(" km            -> Ver total de KMs\n");
+    printf(" hora          -> Ver tempo simulado\n");
+    printf(" cancelar <ID> -> Cancelar serviço (0 para todos)\n");
+    printf(" terminar      -> Encerrar sistema\n");
     printf("----------------------------\n");
 
     log_msg("[SISTEMA]", "Controlador iniciado.");
 }
 
-// Função auxiliar para enviar mensagens de texto para o pipe privado do cliente
 void enviar_resposta(pid_t pid_cli, char *texto) {
     char p_name[100];
     sprintf(p_name, PIPE_CLIENTE, pid_cli);
@@ -166,92 +168,103 @@ void enviar_resposta(pid_t pid_cli, char *texto) {
         close(fd);
     }
 }
+
 // ============================================================================
-// GESTÃO DE AGENDAMENTOS
+// GESTÃO DE AGENDAMENTOS E FROTA (IDs)
 // ============================================================================
 
-void registar_agendamento(char* user, pid_t pid, int h, int d, char* loc) {
+void registar_agendamento_na_lista(int id_servico, char* user, pid_t pid, int h, int d, char* loc) {
     for (int i = 0; i < MAX_AGENDAMENTOS; i++) {
         if (ctrl.agenda[i].ativo == 0) {
+            ctrl.agenda[i].id = id_servico; 
             strcpy(ctrl.agenda[i].username, user);
             ctrl.agenda[i].pid_cliente = pid;
             ctrl.agenda[i].hora = h;
             ctrl.agenda[i].distancia = d;
             strcpy(ctrl.agenda[i].local, loc);
-            ctrl.agenda[i].ativo = 1; // Marca como ocupado
+            ctrl.agenda[i].ativo = 1; 
             
             char msg[100];
-            sprintf(msg, "Agendado para t=%d (Slot %d)", h, i);
+            sprintf(msg, "Agendado ID %d para t=%d (Slot %d)", id_servico, h, i);
             log_msg("[AGENDA]", msg);
             return;
         }
     }
     log_msg("[ERRO]", "Lista de agendamentos cheia!");
 }
+
 int cancelar_servico(pid_t pid_solicitante, int id_cancelar) {
     int cancelados = 0;
 
-    // A. Cancelar Veículos Ativos
+    // --- 1. Cancelar Veículos em Andamento (FROTA) ---
     for (int i = 0; i < ctrl.num_veiculos; i++) {
         if (ctrl.frota[i].pid > 0) {
             int alvo = 0;
-            if (pid_solicitante == -1) { // Admin
-                if (id_cancelar == 0 || ctrl.frota[i].pid_cliente == id_cancelar) alvo = 1;
-            } else { // Cliente
-                if (ctrl.frota[i].pid_cliente == pid_solicitante) alvo = 1;
-            }
-
-            if (alvo) {
-                kill(ctrl.frota[i].pid, SIGUSR1); 
-                close(ctrl.frota[i].fd_leitura);
-                ctrl.frota[i].pid = -1; 
-                ctrl.frota[i].pid_cliente = -1;
-                strcpy(ctrl.frota[i].ultimo_status, "Cancelado");
-                cancelados++;
-            }
-        }
-    }
-
-    // B. Cancelar Agendamentos Pendentes
-    for (int i = 0; i < MAX_AGENDAMENTOS; i++) {
-        if (ctrl.agenda[i].ativo) {
-            int alvo = 0;
-            if (pid_solicitante == -1) {
-                if (id_cancelar == 0 || ctrl.agenda[i].pid_cliente == id_cancelar) alvo = 1;
-            } else {
-                if (ctrl.agenda[i].pid_cliente == pid_solicitante) {
-                    if (id_cancelar == 0 || i == id_cancelar) alvo = 1;
+            
+            if (pid_solicitante == -1) { // ADMIN
+                if (id_cancelar == 0) alvo = 1; 
+                else if (ctrl.frota[i].id_servico == id_cancelar) alvo = 1;
+            } else { // CLIENTE
+                if (ctrl.frota[i].pid_cliente == pid_solicitante) {
+                    if (id_cancelar == 0) alvo = 1; 
+                    else if (ctrl.frota[i].id_servico == id_cancelar) alvo = 1; 
                 }
             }
 
             if (alvo) {
-                pid_t pid_vitima = ctrl.agenda[i].pid_cliente;
+                kill(ctrl.frota[i].pid, SIGUSR1); 
+                strcpy(ctrl.frota[i].ultimo_status, "A cancelar..."); 
+                
+                cancelados++;
+                printf("[SISTEMA] Sinal de cancelamento enviado ao Veículo %d (Serviço ID %d).\n", ctrl.frota[i].pid, ctrl.frota[i].id_servico);
+            }
+        }
+    }
+
+    // --- 2. Cancelar Agendamentos Pendentes (AGENDA) ---
+    for (int i = 0; i < MAX_AGENDAMENTOS; i++) {
+        if (ctrl.agenda[i].ativo) {
+            int alvo = 0;
+
+            if (pid_solicitante == -1) { // ADMIN
+                if (id_cancelar == 0) alvo = 1;
+                else if (ctrl.agenda[i].id == id_cancelar) alvo = 1;
+            } else { // CLIENTE
+                if (ctrl.agenda[i].pid_cliente == pid_solicitante) {
+                    if (id_cancelar == 0) alvo = 1;
+                    else if (ctrl.agenda[i].id == id_cancelar) alvo = 1;
+                }
+            }
+
+            if (alvo) {
                 ctrl.agenda[i].ativo = 0; 
                 cancelados++;
                 
-                // Notificação limpa usando a função auxiliar
-                char aviso[100];
-                sprintf(aviso, "O teu agendamento (ID %d) foi cancelado.", i);
-                enviar_resposta(pid_vitima, aviso);
+                if (pid_solicitante == -1) {
+                    char aviso[100];
+                    sprintf(aviso, "O teu agendamento (ID %d) foi cancelado pelo Admin.", ctrl.agenda[i].id);
+                    enviar_resposta(ctrl.agenda[i].pid_cliente, aviso);
+                }
                 
-                printf("[SISTEMA] Agendamento %d removido.\n", i);
+                printf("[SISTEMA] Agendamento ID %d removido da lista.\n", ctrl.agenda[i].id);
             }
         }
     }
     return cancelados;
 }
+
 // ============================================================================
 // GESTÃO DE VEÍCULOS
 // ============================================================================
 
-void lancar_veiculo(char* user, int pid_cli, int dist, char* local) {
+void lancar_veiculo(char* user, int pid_cli, int dist, char* local, int id_servico) {
     int p[2];
     pid_t pid;
     char str_pid[20], str_dist[20];
     char buffer[100];
 
     if (ctrl.num_veiculos >= NVEICULOS) {
-        log_msg("[AVISO]", "Frota cheia. Pedido recusado (ou adiado).");
+        log_msg("[AVISO]", "Frota cheia. Erro interno (verificar_agendamentos falhou).");
         return;
     }
 
@@ -284,19 +297,19 @@ void lancar_veiculo(char* user, int pid_cli, int dist, char* local) {
 
         int idx = ctrl.num_veiculos;
         ctrl.frota[idx].pid = pid;
-        ctrl.frota[idx].pid_cliente = pid_cli; // Guardar dono
+        ctrl.frota[idx].pid_cliente = pid_cli; 
         ctrl.frota[idx].fd_leitura = p[0];
         ctrl.frota[idx].ocupado = 1;
         ctrl.frota[idx].distancia_viagem = dist;
+        ctrl.frota[idx].id_servico = id_servico; 
         strcpy(ctrl.frota[idx].ultimo_status, "A iniciar");
         ctrl.num_veiculos++;
 
-        sprintf(buffer, "Veículo %d enviado para %s", pid, user);
+        sprintf(buffer, "Veículo enviado (Serviço ID %d) para %s", id_servico, user);
         log_msg("[FROTA]", buffer);
     }
 }
 
-// Verifica se algum agendamento chegou à hora
 void verificar_agendamentos() {
     for (int i = 0; i < MAX_AGENDAMENTOS; i++) {
         if (ctrl.agenda[i].ativo == 1 && ctrl.agenda[i].hora <= ctrl.tempo) {
@@ -305,9 +318,9 @@ void verificar_agendamentos() {
                 lancar_veiculo(ctrl.agenda[i].username, 
                              ctrl.agenda[i].pid_cliente, 
                              ctrl.agenda[i].distancia, 
-                             ctrl.agenda[i].local);
+                             ctrl.agenda[i].local,
+                             ctrl.agenda[i].id); 
                 
-                // Remove da lista
                 ctrl.agenda[i].ativo = 0;
             }
         }
@@ -320,24 +333,35 @@ void verificar_frota() {
     int i, n;
 
     for (i = 0; i < ctrl.num_veiculos; i++) {
-        if (ctrl.frota[i].pid > 0) { // Só verifica ativos
+        if (ctrl.frota[i].pid > 0) { 
             n = read(ctrl.frota[i].fd_leitura, buffer, sizeof(buffer) - 1);
-            if (n > 0) {
+            
+            if (n > 0) { 
                 buffer[n] = '\0';
                 if (buffer[strlen(buffer)-1] == '\n') buffer[strlen(buffer)-1] = '\0';
                 
-                // Guardar status para o comando 'frota'
                 strncpy(ctrl.frota[i].ultimo_status, buffer, 49);
 
-                sprintf(tag, "[TAXI-%d]", ctrl.frota[i].pid);
-                printf("[TEMPO %03d] %-12s %s\n", ctrl.tempo, tag, buffer);
+                sprintf(tag, "[TAXI-%d|ID-%d]", ctrl.frota[i].pid, ctrl.frota[i].id_servico);
+                printf("[TEMPO %03d] %-14s %s\n", ctrl.tempo, tag, buffer);
                 fflush(stdout);
 
                 if (strstr(buffer, "concluída") != NULL) {
-                    ctrl.total_km += ctrl.frota[i].distancia_viagem; // Simplificado
-                    ctrl.frota[i].ocupado = 0;
-                    strcpy(ctrl.frota[i].ultimo_status, "Livre/Terminado");
+                    ctrl.total_km += ctrl.frota[i].distancia_viagem;
+                    strcpy(ctrl.frota[i].ultimo_status, "A terminar...");
                 }
+            }
+            else if (n == 0) {
+                close(ctrl.frota[i].fd_leitura);
+                
+                if (i != ctrl.num_veiculos - 1) {
+                    ctrl.frota[i] = ctrl.frota[ctrl.num_veiculos - 1];
+                    i--; 
+                } else {
+                    ctrl.frota[i].pid = 0;
+                }
+                
+                ctrl.num_veiculos--;
             }
         }
     }
@@ -353,22 +377,18 @@ void processar_comando_cliente(Mensagem *m) {
     char loc[100];
 
     if (strcmp(m->comando, "login") == 0) {
-        // --- VERIFICAÇÃO DE DUPLICADOS ---
         int existe = 0;
         for (int i = 0; i < NUTILIZADORES; i++) {
             if (ctrl.clientes[i].pid > 0 && strcmp(ctrl.clientes[i].username, m->username) == 0) {
-                existe = 1;
-                break;
+                existe = 1; break;
             }
         }
 
-        // Preparar comunicação com o cliente
         char pipe_cli[100];
         sprintf(pipe_cli, PIPE_CLIENTE, m->pid);
         int fd = open(pipe_cli, O_WRONLY | O_NONBLOCK);
 
         if (existe) {
-            // CASO DE ERRO: Avisar e não registar
             if (fd != -1) {
                 Mensagem erro;
                 erro.pid = getpid();
@@ -377,64 +397,69 @@ void processar_comando_cliente(Mensagem *m) {
                 write(fd, &erro, sizeof(Mensagem));
                 close(fd);
             }
-            log_msg("[LOGIN]", "Rejeitado: nome duplicado.");
+            log_msg("[LOGIN]", "Rejeitado: nome duplicado."); // Log adicional
         } 
         else {
-            // CASO DE SUCESSO: Registar e AVISAR O CLIENTE (Isto faltava!)
-            registar_cliente(m->pid, m->username); 
-            
-            if (fd != -1) {
-                Mensagem ok;
-                ok.pid = getpid();
-                strcpy(ok.comando, "login_ok"); // Código de sucesso
-                strcpy(ok.mensagem, "Login aceite.");
-                write(fd, &ok, sizeof(Mensagem));
-                close(fd);
+            // CORREÇÃO: Verifica se realmente conseguiu registar (se havia espaço)
+            if (registar_cliente(m->pid, m->username)) {
+                if (fd != -1) {
+                    Mensagem resposta;
+                    resposta.pid = getpid();
+                    strcpy(resposta.comando, "login_ok");
+                    strcpy(resposta.mensagem, "Login aceite.");
+                    write(fd, &resposta, sizeof(Mensagem));
+                    close(fd);
+                }
+                sprintf(msg_buf, "Cliente %s (PID %d) entrou.", m->username, m->pid);
+                log_msg("[LOGIN]", msg_buf);
+            } 
+            else {
+                // Se a função retornou 0, é porque não havia espaço
+                if (fd != -1) {
+                    Mensagem erro;
+                    erro.pid = getpid();
+                    strcpy(erro.comando, "erro");
+                    strcpy(erro.mensagem, "Servidor cheio! Tente mais tarde.");
+                    write(fd, &erro, sizeof(Mensagem));
+                    close(fd);
+                }
+                log_msg("[LOGIN]", "Rejeitado: Servidor cheio.");
             }
-            
-            sprintf(msg_buf, "Cliente %s (PID %d) entrou.", m->username, m->pid);
-            log_msg("[LOGIN]", msg_buf);
         }
     }
     else if (strcmp(m->comando, "agendar") == 0) {
         if (sscanf(m->mensagem, "%d %99s %d", &h, loc, &d) == 3) {
-            sprintf(msg_buf, "Agendar: %s, %dkm, %dh", loc, d, h);
+            
+            int novo_id = ctrl.proximo_id++;
+
+            sprintf(msg_buf, "Pedido Agendar (ID %d): %s, %dkm, %dh", novo_id, loc, d, h);
             log_msg("[PEDIDO]", msg_buf);
             
-            // 1. IMPEDIR AGENDAMENTO NO PASSADO
             if (h < ctrl.tempo) {
                 char erro_msg[100];
-                sprintf(erro_msg, "Erro: Impossível agendar para %d (Tempo atual: %d).", h, ctrl.tempo);
+                sprintf(erro_msg, "Erro: Impossível agendar para %d (Atual: %d).", h, ctrl.tempo);
                 enviar_resposta(m->pid, erro_msg);
-                log_msg("[ERRO]", "Tentativa de agendamento no passado recusada.");
             }
-            // 2. SE FOR PARA AGORA E HOUVER VAGA
             else if (h == ctrl.tempo && ctrl.num_veiculos < NVEICULOS) {
-                lancar_veiculo(m->username, m->pid, d, loc);
-                // Feedback de sucesso imediato
-                enviar_resposta(m->pid, "Sucesso: Veículo enviado de imediato!");
+                lancar_veiculo(m->username, m->pid, d, loc, novo_id);
+                
+                char resp[100];
+                sprintf(resp, "Sucesso: Serviço ID %d iniciado de imediato!", novo_id);
+                enviar_resposta(m->pid, resp);
             } 
-            // 3. SE FOR FUTURO OU FROTA CHEIA -> LISTA DE ESPERA
             else {
-                registar_agendamento(m->username, m->pid, h, d, loc);
-                // Feedback de agendamento
+                registar_agendamento_na_lista(novo_id, m->username, m->pid, h, d, loc);
+                
                 char confirm[100];
-                sprintf(confirm, "Sucesso: Agendamento registado para o tempo %d.", h);
+                sprintf(confirm, "Sucesso: Agendamento ID %d registado para t=%d.", novo_id, h);
                 enviar_resposta(m->pid, confirm);
             }
         } else {
-            // Feedback de erro de sintaxe
             enviar_resposta(m->pid, "Erro sintaxe. Use: agendar <hora> <local> <km>");
-            log_msg("[ERRO]", "Formato incorreto.");
         }
     }
     else if (strcmp(m->comando, "consultar") == 0) {
-        log_msg("[PEDIDO]", "Cliente pediu consulta de agenda.");
-        
         int encontrou = 0;
-        char resposta[256];
-        
-        // Preparar o pipe para responder ao cliente
         char pipe_cli[100];
         sprintf(pipe_cli, PIPE_CLIENTE, m->pid);
         int fd_resp = open(pipe_cli, O_WRONLY | O_NONBLOCK);
@@ -444,63 +469,56 @@ void processar_comando_cliente(Mensagem *m) {
             resp.pid = getpid();
             strcpy(resp.comando, "resposta");
 
-            // Varrer a agenda à procura de viagens deste cliente
             for (int i = 0; i < MAX_AGENDAMENTOS; i++) {
                 if (ctrl.agenda[i].ativo && ctrl.agenda[i].pid_cliente == m->pid) {
-                    
-                    sprintf(resposta, "Agendamento ID %d: %dh -> %s (%dkm)", 
-                            i, ctrl.agenda[i].hora, ctrl.agenda[i].local, ctrl.agenda[i].distancia);
-                    
-                    strcpy(resp.mensagem, resposta);
+                    char buffer[256];
+                    sprintf(buffer, "PENDENTE | ID %d | %dh | %s (%dkm)", 
+                            ctrl.agenda[i].id, ctrl.agenda[i].hora, ctrl.agenda[i].local, ctrl.agenda[i].distancia);
+                    strcpy(resp.mensagem, buffer);
+                    write(fd_resp, &resp, sizeof(Mensagem));
+                    encontrou = 1;
+                }
+            }
+            for (int i = 0; i < ctrl.num_veiculos; i++) {
+                if (ctrl.frota[i].pid > 0 && ctrl.frota[i].pid_cliente == m->pid) {
+                    char buffer[256];
+                    sprintf(buffer, "A DECORRER | ID %d | %s", 
+                            ctrl.frota[i].id_servico, ctrl.frota[i].ultimo_status);
+                    strcpy(resp.mensagem, buffer);
                     write(fd_resp, &resp, sizeof(Mensagem));
                     encontrou = 1;
                 }
             }
 
             if (!encontrou) {
-                strcpy(resp.mensagem, "Não tens agendamentos pendentes.");
+                strcpy(resp.mensagem, "Sem serviços ativos ou pendentes.");
                 write(fd_resp, &resp, sizeof(Mensagem));
             }
-            
             close(fd_resp);
         }
     }
     else if (strcmp(m->comando, "cancelar") == 0) {
-        // 1. Ler o ID que o cliente enviou (vem na mensagem)
-        // Se o cliente escreveu só "cancelar", o atoi dá 0 e cancela tudo dele
         int id_alvo = atoi(m->mensagem);
         
-        sprintf(msg_buf, "Cliente %s pediu cancelamento (ID=%d).", m->username, id_alvo);
+        sprintf(msg_buf, "Cliente %s pede cancelamento ID=%d", m->username, id_alvo);
         log_msg("[PEDIDO]", msg_buf);
         
-        // 2. Executar o cancelamento usando a função auxiliar que já tens
-        // IMPORTANTE: Passamos m->pid como primeiro argumento para garantir
-        // que o cliente só consegue cancelar as SUAS PRÓPRIAS viagens.
         int n = cancelar_servico(m->pid, id_alvo);
         
-        // 3. Responder ao Cliente
         char resp[100];
-        if (n > 0) {
-            sprintf(resp, "Sucesso: %d serviços cancelados.", n);
-        } else {
-            if (id_alvo == 0) strcpy(resp, "Não tens serviços ativos para cancelar.");
-            else strcpy(resp, "Erro: Serviço não encontrado ou não te pertence.");
-        }
+        if (n > 0) sprintf(resp, "Sucesso: %d serviços cancelados.", n);
+        else sprintf(resp, "Erro: Serviço ID %d não encontrado ou não te pertence.", id_alvo);
         
-        // Enviar a resposta para o pipe do cliente
         enviar_resposta(m->pid, resp);
     }
     else if (strcmp(m->comando, "terminar") == 0) {
-        // 1. Verificar se o cliente tem algum veículo ativo
         int ocupado = 0;
         for(int i=0; i<ctrl.num_veiculos; i++) {
             if (ctrl.frota[i].pid > 0 && ctrl.frota[i].pid_cliente == m->pid) {
-                ocupado = 1;
-                break;
+                ocupado = 1; break;
             }
         }
 
-        // 2. Preparar resposta para o cliente
         char pipe_cli[100];
         sprintf(pipe_cli, PIPE_CLIENTE, m->pid);
         int fd_resp = open(pipe_cli, O_WRONLY | O_NONBLOCK);
@@ -508,17 +526,12 @@ void processar_comando_cliente(Mensagem *m) {
         if (fd_resp != -1) {
             Mensagem resp;
             resp.pid = getpid();
-            
             if (ocupado) {
-                // REJEITA a saída
                 strcpy(resp.comando, "erro");
-                strcpy(resp.mensagem, "Nao podes sair durante uma viagem! Aguarda ou cancela.");
-                log_msg("[AVISO]", "Cliente tentou sair durante viagem.");
+                strcpy(resp.mensagem, "Tens viagens a decorrer! Cancela-as antes de sair.");
             } else {
-                // ACEITA a saída
-                strcpy(resp.comando, "exit_ok"); // Comando especial para o cliente fechar
+                strcpy(resp.comando, "exit_ok");
                 strcpy(resp.mensagem, "A desligar...");
-                
                 remover_cliente(m->pid); 
                 sprintf(msg_buf, "Cliente %s saiu.", m->username);
                 log_msg("[LOGOUT]", msg_buf);
@@ -532,11 +545,9 @@ void processar_comando_cliente(Mensagem *m) {
 void verificar_clientes() {
     Mensagem m;
     int n = read(ctrl.fd_clientes, &m, sizeof(Mensagem));
-    
     if (n > 0) {
         processar_comando_cliente(&m);
-    } 
-    else if (n == 0) {
+    } else if (n == 0) {
         close(ctrl.fd_clientes);
         ctrl.fd_clientes = open(PIPE_CONTROLADOR, O_RDONLY | O_NONBLOCK);
     }
@@ -547,7 +558,7 @@ void verificar_clientes() {
 // ============================================================================
 
 void verificar_admin() {
-    char cmd[100], arg[50];
+    char cmd[100], arg[50] = "";
     int n = read(STDIN_FILENO, cmd, sizeof(cmd)-1);
     if (n > 0) {
         cmd[n] = '\0';
@@ -555,91 +566,71 @@ void verificar_admin() {
 
         char *token = strtok(cmd, " ");
         if (token == NULL) return;
-        // char *token_arg = strtok(NULL, " "); // (Pode ser usado para argumentos futuros)
+        char *temp_arg = strtok(NULL, " ");
+        if (temp_arg) strcpy(arg, temp_arg);
 
         if (strcmp(token, "listar") == 0) {
             printf("\n--- AGENDAMENTOS PENDENTES ---\n");
             int vazia = 1;
             for(int i=0; i<MAX_AGENDAMENTOS; i++) {
                 if(ctrl.agenda[i].ativo) {
-                    printf("ID %d | Cliente: %s | Hora: %d | Origem: %s\n", 
-                           i, ctrl.agenda[i].username, ctrl.agenda[i].hora, ctrl.agenda[i].local);
+                    printf("ID %d | Cliente: %s | Hora: %d | Destino: %s\n", 
+                           ctrl.agenda[i].id, ctrl.agenda[i].username, ctrl.agenda[i].hora, ctrl.agenda[i].local);
                     vazia = 0;
                 }
             }
             if(vazia) printf("(Vazio)\n");
             printf("------------------------------\n");
         }
-        else if (strcmp(token, "utiliz") == 0) {
-            printf("\n--- UTILIZADORES LIGADOS ---\n");
-            int vazia = 1;
-            for(int i=0; i<NUTILIZADORES; i++) {
-                if(ctrl.clientes[i].pid > 0) {
-                    printf("- %s (PID %d)\n", ctrl.clientes[i].username, ctrl.clientes[i].pid);
-                    vazia = 0;
-                }
-            }
-            if(vazia) printf("(Vazio)\n");
-            printf("----------------------------\n");
-            fflush(stdout);
-        }
         else if (strcmp(token, "frota") == 0) {
             printf("\n--- ESTADO DA FROTA ---\n");
             int vazia = 1;
             for(int i=0; i<ctrl.num_veiculos; i++) {
                 if(ctrl.frota[i].pid > 0) {
-                    printf("Taxi %d (Cliente %d): %s\n", 
-                           ctrl.frota[i].pid, ctrl.frota[i].pid_cliente,
-                           ctrl.frota[i].ocupado ? ctrl.frota[i].ultimo_status : "Livre");
+                    printf("Taxi %d [ID Serviço %d]: %s\n", 
+                           ctrl.frota[i].pid, ctrl.frota[i].id_servico,
+                           ctrl.frota[i].ultimo_status);
                     vazia = 0;
                 }
             }
-            if(vazia) printf("(Nenhum veículo na frota)\n");
+            if(vazia) printf("(Nenhum veículo ativo)\n");
             printf("-----------------------\n");
-            fflush(stdout);
         }
         else if (strcmp(token, "cancelar") == 0) {
-            // Se não escreveu ID, avisa
             if (strlen(arg) == 0) {
-                printf("[ERRO] Uso: cancelar <PID_CLIENTE> (ou 0 para tudo)\n");
+                printf("[ERRO] Uso: cancelar <ID_SERVICO> (ou 0 para tudo)\n");
             } else {
                 int id_alvo = atoi(arg);
-                printf("[ADMIN] A cancelar serviços do cliente %d (ou todos se 0)...\n", id_alvo);
+                printf("[ADMIN] A cancelar serviço ID %d (ou todos se 0)...\n", id_alvo);
                 
-                // Chama a função com -1 (Sou Admin) e o PID alvo
-                int n = cancelar_servico(-1, id_alvo);
-                
-                printf("[ADMIN] Resultado: %d serviços cancelados.\n", n);
+                int num = cancelar_servico(-1, id_alvo);
+                printf("[ADMIN] %d serviços cancelados.\n", num);
             }
-            fflush(stdout);
         }
-        else if (strcmp(token, "km") == 0) {
-            printf("[ADMIN] Total KMs: %d\n", ctrl.total_km);
+        else if (strcmp(token, "utiliz") == 0) {
+            printf("\n--- UTILIZADORES ---\n");
+            for(int i=0; i<NUTILIZADORES; i++)
+                if(ctrl.clientes[i].pid > 0) printf("- %s (PID %d)\n", ctrl.clientes[i].username, ctrl.clientes[i].pid);
+            printf("--------------------\n");
         }
-        else if (strcmp(token, "hora") == 0) {
-            printf("[ADMIN] Tempo Simulado: %d\n", ctrl.tempo);
-        }
-        else if (strcmp(token, "terminar") == 0) {
-            exit(0);
-        }
+        else if (strcmp(token, "km") == 0) printf("[ADMIN] Total KMs: %d\n", ctrl.total_km);
+        else if (strcmp(token, "hora") == 0) printf("[ADMIN] Tempo Simulado: %d\n", ctrl.tempo);
+        else if (strcmp(token, "terminar") == 0) exit(0);
         else {
-            char bufferErro[100];
-            sprintf(bufferErro, "Comando inválido: %s", token);
-            log_msg("[ERRO]", bufferErro);
+            printf("[ERRO] Comando desconhecido: %s\n", token);
         }
+        
         fflush(stdout);
     }
 }
 
 int main() {
     setup_inicial();
-
     while (1) {
         verificar_clientes(); 
         verificar_frota();
-        verificar_agendamentos(); // Verificar lista de espera
+        verificar_agendamentos();
         verificar_admin();    
-
         sleep(1); 
         ctrl.tempo++;
     }
