@@ -2,6 +2,7 @@
 
 char pipe_cliente_nome[100];
 int fd_cliente_pipe = -1;
+int km_percorridos_final = 0;
 
 // ============================================================================
 // GESTÃO DE RECURSOS E SINAIS
@@ -14,6 +15,7 @@ void limpar_recursos() {
 
 void trata_sinal_cancelar(int s) {
     // Requisito: "Caso receba o sinal SIGUSR1 deve cancelar o serviço"
+    printf("[RELATORIO] %d\n", km_percorridos_final);
     printf("Viagem cancelada pelo controlador!\n"); 
     fflush(stdout); // Garante que o controlador lê isto imediatamente
     
@@ -59,31 +61,34 @@ void iniciar_viagem(const char *local) {
     // Informa que chegou e começa logo (Simplificação do Prof)
     sprintf(msg.mensagem, "Veículo chegou a %s. A iniciar viagem...", local);
     write(fd_cliente_pipe, &msg, sizeof(Mensagem));
+
+
 }
 
 void realizar_viagem_simulada(int distancia_total) {
-    printf("Início da viagem de %dkm.\n", distancia_total); // Para o Controlador
+    //printf("Início da viagem de %dkm.\n", distancia_total); // Para o Controlador
 
     int perc = 0;
-    int km_percorridos = 0;
+    
     
     // Loop simples de simulação
-    while (km_percorridos < distancia_total) {
+    while (km_percorridos_final < distancia_total) {
         sleep(1); // Avanço do tempo (1s = 1 unidade de tempo)
-        km_percorridos++;
+        km_percorridos_final++;
         
-        int nova_perc = (km_percorridos * 100) / distancia_total;
+        int nova_perc = (km_percorridos_final * 100) / distancia_total;
         
         // Reporta a cada 10% ao Controlador (via stdout)
         if (nova_perc / 10 > perc / 10) {
-            printf("Progresso: %d%% (%d/%d km)\n", nova_perc, km_percorridos, distancia_total);
+            printf("Progresso: %d%% (%d/%d km)\n", nova_perc, km_percorridos_final, distancia_total);
             fflush(stdout); // Importante para o pipe anónimo não ficar preso
         }
         perc = nova_perc;
     }
 
-    // Conclusão normal
-    printf("Viagem concluída com sucesso.\n"); // Para o Controlador
+    // Reporta o total final ao Controlador
+    printf("[RELATORIO] %d\n", km_percorridos_final);
+    printf("Viagem concluída com sucesso.\n");
     
     // Avisa o Cliente
     Mensagem msg_fim;

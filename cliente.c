@@ -27,7 +27,10 @@ void trataSinais(int s) {
 
 void receberMensagens() {
     int fd_recebe = open(pipe_cliente, O_RDWR); // O_RDWR para não dar EOF
-    if(fd_recebe == -1) exit(1);
+    if(fd_recebe == -1) {
+        perror("[ERRO] Falha ao abrir pipe de leitura");
+        exit(1);
+    }
 
     Mensagem resp;
     while (read(fd_recebe, &resp, sizeof(resp)) > 0) {
@@ -74,6 +77,7 @@ void enviarComandos(const char *username) {
     printf(" agendar <hora> <local> <km>\n");
     printf(" cancelar <ID>\n");
     printf(" consultar\n");
+    printf(" decisao <ID> <s/n>  (Responder a proposta)\n");
     printf(" terminar\n");
     printf("----------------------------\n");
 
@@ -81,15 +85,21 @@ void enviarComandos(const char *username) {
         printf("> ");
         if (fgets(input, sizeof(input), stdin) == NULL) break;
         
-        // Remover \n manualmente
-        if (strlen(input) > 0 && input[strlen(input)-1] == '\n') {
-            input[strlen(input)-1] = '\0';
+        size_t len = strlen(input);
+        if (len > 0 && input[len-1] == '\n') {
+            input[len-1] = '\0';
         }
 
         if (strlen(input) == 0) continue;
 
+        
         char *cmd = strtok(input, " ");
         char *args = strtok(NULL, ""); 
+        
+        if (args == NULL && len > strlen(cmd)) {
+             args = input + strlen(cmd) + 1;
+             if (*args == '\0') args = NULL;
+        }
 
         if (cmd == NULL) continue;
 
@@ -99,10 +109,9 @@ void enviarComandos(const char *username) {
         else msg.mensagem[0] = '\0';
 
         // Apenas aceita os comandos de gestão, já não aceita entrar/sair
-        if(strcmp(cmd, "agendar") == 0 || strcmp(cmd, "consultar") == 0 || strcmp(cmd, "cancelar") == 0 || strcmp(cmd, "terminar") == 0) {
+        if(strcmp(cmd, "agendar") == 0 || strcmp(cmd, "consultar") == 0 || strcmp(cmd, "cancelar") == 0 || strcmp(cmd,"decisao") == 0 || strcmp(cmd, "terminar") == 0) {
             write(fd_controlador, &msg, sizeof(Mensagem));
             
-            //if(strcmp(cmd, "terminar") == 0) break;
         } else {
             printf("Comando desconhecido ou inválido.\n");
         }
@@ -128,6 +137,12 @@ int main(int argc, char *argv[]) {
     sprintf(pipe_cliente, PIPE_CLIENTE, getpid());
     if (mkfifo(pipe_cliente, 0666) == -1 && errno != EEXIST) return 1;
 
+    int fd_resposta = open(pipe_cliente, O_RDWR);
+    if (fd_resposta == -1) {
+        perror("[ERRO] Não consegui abrir o meu pipe para resposta");
+        return 1;
+    }
+
     // Configura SINAIS
     signal(SIGINT, trataSinais);
     signal(SIGUSR1, trataSinais); 
@@ -141,16 +156,15 @@ int main(int argc, char *argv[]) {
     strcpy(login.username, argv[1]);
     strcpy(login.comando, "login");
     strcpy(login.mensagem, "Entrei"); 
+    
     write(fd_controlador, &login, sizeof(Mensagem));
 
-    int fd_resposta = open(pipe_cliente, O_RDONLY);
-    if (fd_resposta == -1) {
-        perror("[ERRO] Não consegui abrir o meu pipe para resposta");
+    Mensagem resposta;
+    if(read(fd_resposta, &resposta, sizeof(Mensagem))<=0){
+        printf("[ERRO] Erro ao ler resposta ou pipe fechado.\n");
+        close(fd_resposta);
         return 1;
     }
-
-    Mensagem resposta;
-    read(fd_resposta, &resposta, sizeof(Mensagem)); // <--- FICA AQUI PARADO À ESPERA
     close(fd_resposta);
 
     // 3. VERIFICAR SE POSSO ENTRAR
