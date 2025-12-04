@@ -1,7 +1,7 @@
 all: controlador cliente veiculo
 
 controlador: controlador.c comum.h
-	gcc -o controlador controlador.c
+	gcc -o controlador controlador.c -pthread
 
 cliente: cliente.c comum.h
 	gcc -o cliente cliente.c

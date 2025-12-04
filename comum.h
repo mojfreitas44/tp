@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <signal.h>
 #include <errno.h>
+#include <pthread.h>
 
 #define PIPE_CONTROLADOR "controlador_fifo"
 #define PIPE_CLIENTE "pipe%d"
